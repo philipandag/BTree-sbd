@@ -4,6 +4,7 @@
 using std::string;
 using std::cout;
 using std::to_string;
+using std::cin;
 
 const int RECORD_LENGTH = 5;
 const int BUFFER_SIZE = 5;
@@ -40,6 +41,7 @@ public:
     int myAddress = -1;
     int recordsFilled = 0;
     
+    bool dirty = true;
 
     string toString() const
     {
@@ -84,14 +86,17 @@ public:
 };
 
 
-
 class Btree {
     FILE* file = nullptr;
     FILE* index = nullptr;
 
-    BNode root;
-    BNode nodebuffer;
-    BNode* nodeptr;
+    const int NODE_BUFFER_SIZE = 10;
+    BNode** nodeBuffer; //nodeBuffer[0] is always the root
+    int nodeBufferTop = 0;
+    //BNode root;
+    //BNode nodebuffer;
+    //BNode* nodeptr;
+    int bufferTop = 0;
 
     int numberOfNodes = 0;
 
@@ -115,10 +120,10 @@ public:
     {}
 
     BNode* getCurrentNode(){
-        return nodeptr;
+        return nodeBuffer[nodeBufferTop];
     }
     BNode* getRoot(){
-        return &root;
+        return nodeBuffer[0];
     }
 
     Btree(string path, string mode = "r+b")
@@ -130,21 +135,27 @@ public:
         fseek(file, 0, SEEK_SET);
         fseek(index, 0, SEEK_SET);
 
-        // creating root if file doesnt contain it
-        if(fread(&root, sizeof(BNode), 1, index) != 1)
+        nodeBuffer = (BNode**) malloc(sizeof(BNode*) * NODE_BUFFER_SIZE);
+        for(int i = 0; i < NODE_BUFFER_SIZE; i++)
         {
-            root.myAddress = 0;
-            root.parentAddress = -1;
-            root.recordsFilled = 0;
+            nodeBuffer[i] = (BNode*) malloc(sizeof(BNode));
+        }
+
+        // creating root if file doesnt contain it
+        if(fread(nodeBuffer[0], sizeof(BNode), 1, index) != 1)
+        {
+            nodeBuffer[0]->myAddress = 0;
+            nodeBuffer[0]->parentAddress = -1;
+            nodeBuffer[0]->recordsFilled = 0;
             for(int i = 0; i < NODE_SIZE; i++)
             {
-                root.childrenAddress[i] = -1;
-                root.records[i] = {-1, -1};
+                nodeBuffer[0]->childrenAddress[i] = -1;
+                nodeBuffer[0]->records[i] = {-1, -1};
             }
-            root.childrenAddress[NODE_SIZE] = -1;
+            nodeBuffer[0]->childrenAddress[NODE_SIZE] = -1;
 
             fseek(index, 0, SEEK_SET);
-            if(fwrite(&root, sizeof(BNode), 1, index)!=1)
+            if(fwrite(nodeBuffer, sizeof(BNode), 1, index)!=1)
             {
                 cout << "Error Btree constructor could not write root to index\n";
             }
@@ -156,7 +167,6 @@ public:
         fileMode = "r+b"; // after creating the file we dont want to 
                         // overwrite it
         findLastNodeAddress();
-        nodeptr = &root;
         cout << "Tree constructor, this address " << this << "\n";
     }
 
@@ -201,7 +211,11 @@ public:
     
     bool indexInBuffer(int indexAddress)
     {
-        return indexAddress == nodeptr->myAddress;
+        for(int i = 0; i < nodeBufferTop; i++)
+            if(indexAddress == nodeBuffer[i]->myAddress)
+                return true;
+
+        return false;
     }
         
     bool dataInBuffer(int recordAddress)
@@ -209,39 +223,54 @@ public:
         return (recordAddress >= loadedBlockNumber * BUFFER_SIZE) && (recordAddress < (loadedBlockNumber+1) * BUFFER_SIZE);
     }
 
-    // because its using loadNode after calling this function and not finding the record
-    // the loaded node should be the one where the record we are searching for should be placed
-    // if we intend to insert it
+    BNode* topNode()
+    {
+        return nodeBuffer[nodeBufferTop];
+    }
+
+    BNode* topNodeParent()
+    {
+        if(nodeBufferTop == 0)
+            return nullptr;
+        return nodeBuffer[nodeBufferTop-1];
+    }
+
     int findRecord(int key)
     {
-        nodeptr = &root;
         open();
 
-        while(true)
+        for(int i = 0; i < topNode()->recordsFilled; i++)
         {
-            for(int i = 0; i < nodeptr->recordsFilled; i++)
+            if(topNode()->records[i].key == key) // found, return
+            { 
+                return topNode()->records[i].address;
+            }
+            else if(topNode()->records[i].key > key)// is smaller than some record
             {
-                if(nodeptr->records[i].key == key) // found, return
-                { 
-                    return nodeptr->records[i].address;
-                }
-                else if(nodeptr->records[i].key > key)// is smaller than some record
+                if(pushNodeChild(i)) // true if child exists and was pushed to the buffer
                 {
-                    if(!loadNode(nodeptr->childrenAddress[i]))
+                    int ret = findRecord(key);
+                    if(ret != -1)
                     {
                         close();
-                        return -1;
+                        return ret; // found in the child
                     }
-                    i = 0;
+                    return -1;
+                    //popNode(); // TODO
                 }
             }
+        }
 
-            // key is bigger than anything in this node, check in the last child
-            if(!loadNode(nodeptr->childrenAddress[NODE_SIZE])) // if there is no child, return null
+        // key is bigger than anything in this node, check in the last child
+        if(pushNodeChild(topNode()->recordsFilled))
+        {
+            int ret = findRecord(key);
+            if(ret != -1)
             {
                 close();
-                return -1;   
-            }    
+                return ret; // found in the child
+            }
+            //popNode(); // TODO
         }
 
         close();
@@ -250,9 +279,12 @@ public:
 
     void flushNode(BNode* node)
     {
+        if(!node->dirty)
+            return;
         open();
         if(index){
             fseek(index, node->myAddress * sizeof(BNode), SEEK_SET);
+            node->dirty = false;
             if(fwrite(node, sizeof(BNode), 1, index)!=1)
             {
                 cout << "Error flushNode could not write to index\n";
@@ -263,22 +295,6 @@ public:
         close();
     }
 
-    void flushCurrentNode()
-    {
-        flushNode(nodeptr);
-    }
-
-    void flushRoot()
-    {
-        flushNode(&root);
-    }
-
-    bool loadRoot()
-    {
-        //flushRoot();
-        nodeptr = &root;
-        return true;
-    }
 
     // careful, may need to be free'd
     BNode* readNode(int address)
@@ -297,10 +313,8 @@ public:
 
         open();
         fseek(index, address * sizeof(BNode), SEEK_SET);
-        int recordsRead = fread(&nodebuffer, sizeof(BNode), 1, index);
+        int recordsRead = fread(node, sizeof(BNode), 1, index);
         close();
-
-        nodeptr = &nodebuffer;
 
         if(recordsRead == 0)
         {
@@ -313,44 +327,36 @@ public:
         return node;
     }
 
-    // return true if node exists
-    bool loadNode(int address)
+    bool pushNodeChild(int index)
     {
-        if(address == 0)
+        if(nodeBuffer[nodeBufferTop]->childrenAddress[index] != -1)
         {
-            return loadRoot();
+            nodeBuffer[nodeBufferTop+1] = readNode(nodeBuffer[nodeBufferTop]->childrenAddress[index]);
+            nodeBufferTop++;
+            return true;
         }
-        if(address == -1) // trying to load null
+        return false;
+    }
+
+    void popAll()
+    {
+        for(int i = nodeBufferTop; i > 0; i--)
         {
-            return false;
+            popNode();
         }
+    }
 
-        if(address >= numberOfNodes) // trying to load a node after the last node
+    bool popNode()
+    {
+        if(nodeBufferTop > 0)
         {
-            return false;
+            flushNode(nodeBuffer[nodeBufferTop]);
+            free(nodeBuffer[nodeBufferTop]);
+            nodeBuffer[nodeBufferTop] = nullptr;
+            nodeBufferTop--;
+            return true;
         }
-
-        if(address != nodeptr->myAddress)
-        {
-            flushCurrentNode();
-
-            open();
-            fseek(index, address * sizeof(BNode), SEEK_SET);
-            int recordsRead = fread(&nodebuffer, sizeof(BNode), 1, index);
-            close();
-
-            nodeptr = &nodebuffer;
-
-            if(recordsRead == 0)
-            {
-                cout << "ERROR, Btree.loadNode nothing read!";
-                return false;
-            }
-
-            readDiskOperations++;
-        }
-
-        return true;
+        return false;
     }
 
     Record* getRecordByIndex(int number)
@@ -387,9 +393,11 @@ public:
 
     void addRecord(Record record)
     {
-        loadNode(root.myAddress);
+        popAll();
+        int address = dataAppendRecord(record);
+        BRecord brecord = BRecord(address, record.key);
 
-        int a = findRecord(record.key);
+        int a = findRecord(record.key); // topNode is the one where the record should be 
         if(a != -1)
         {
             cout << "ALREADY EXISTS!";
@@ -399,272 +407,257 @@ public:
 
         // after calling find record the node where the record should be put
         // is loaded
-        nodeAddRecord(nodeptr->myAddress, record);     
-    }   
+        topAddRecord(brecord);     
+    }
 
-    void nodeAddRecord(int nodeAddress, Record r, int childAddress = -1)
-    {
-        loadNode(nodeAddress);
-        int key = r.key;
-
-        
-        if(nodeptr->recordsFilled < NODE_SIZE)
+    void topAddRecord(BRecord record, int childAddress = -1)
+    {    
+        if(topNode()->recordsFilled < NODE_SIZE)
         {
             for(int i = 0; i < NODE_SIZE; i++)
             {
                 // there are no records or it is the biggest record so far
-                if(nodeptr->records[i].empty())
+                if(topNode()->records[i].empty() && topNode()->childrenAddress[i] == -1)
                 {
-                    int address = dataAppendRecord(r);
-                    BRecord brecord = {address, r.key};
-                    nodeptr->records[i] = brecord;
-                    nodeptr->childrenAddress[i] = childAddress;
-                    nodeptr->recordsFilled++;
+                    topNode()->records[i] = record;
+                    topNode()->childrenAddress[i] = childAddress;
+                    topNode()->recordsFilled++;
+                    topNode()->dirty = true;
                     return;
                 }
 
                 // if the node is not full and there is a larger key
                 // insert to this node by making place for the new record
-                if(nodeptr->records[i].key > key && nodeptr->childEmpty(i)) 
+                if(topNode()->records[i].key > record.key && topNode()->childEmpty(i)) 
                 {
                     for(int j = NODE_SIZE-1; j > i; j--)// shift records one place to the right to make index 'i' empty 
                     {
-                        nodeptr->records[j] = nodeptr->records[j-1];
-                        nodeptr->childrenAddress[j] = nodeptr->childrenAddress[j-1];
+                        topNode()->records[j] = topNode()->records[j-1];
+                        topNode()->childrenAddress[j] = topNode()->childrenAddress[j-1];
                     }
-                    int address = dataAppendRecord(r);
-                    BRecord brecord = {address, r.key};
-                    nodeptr->records[i] = brecord;
-                    nodeptr->childrenAddress[i] = childAddress;
-                    nodeptr->childrenAddress[i] = -1;
-                    nodeptr->recordsFilled++;
+                    topNode()->records[i] = record;
+                    topNode()->childrenAddress[i] = childAddress;
+                    topNode()->recordsFilled++;
+                    topNode()->dirty = true;
                     return;
                 }
             }
             
         }
+        else if(topNode())
 
-        // node overflow, try compensation
-        bool compensated = false;
-        if(nodeptr->parentAddress == root.myAddress)
-        {
-            flushRoot();
-        }
-        if(nodeptr->parentAddress != -1)
-        {
-            BNode* parent = readNode(nodeptr->parentAddress);
-            if(parent == nullptr)
-            {
-                cout << "Compensation, failed to load parent!\n";
-                cin.get();
-                cin.get();
-                return;
-            }
+        // // node overflow, try compensation
+        // bool compensated = false;
 
-            int childNumber = -1;
-            for(int i = 0; i < NODE_SIZE+1; i++)
-            {
-                if(parent->childrenAddress[i] == nodeptr->myAddress)
-                {
-                    childNumber = i;
-                    break;   
-                }
-            }
-            if(childNumber == -1)
-            {
-                cout << "Compensation, parent doesnt know me!\n";
-                cin.get();
-                cin.get();
-                return;
-            }
+        // if(topNodeParent())
+        // {
+        //     int childNumber = -1;
+        //     for(int i = 0; i < NODE_SIZE+1; i++)
+        //     {
+        //         if(topNodeParent()->childrenAddress[i] == topNode()->myAddress)
+        //         {
+        //             childNumber = i;
+        //             break;   
+        //         }
+        //     }
 
-            BNode* leftSibling = nullptr;
-            if(childNumber > 0)
-                leftSibling = readNode(parent->childrenAddress[childNumber-1]);
-            if(leftSibling)
-            {
-                if(leftSibling->recordsFilled < NODE_SIZE) // it is not full
-                {
-                    // reading all records to an array for distribution
-                    int totalRecords = nodeptr->recordsFilled + leftSibling->recordsFilled + 2; // + record in parent + record to insert
-                    BRecord* records = (BRecord*) malloc(sizeof(BRecord) * totalRecords);
+        //     if(childNumber == -1)
+        //     {
+        //         cout << "Compensation, parent doesnt know me!\n";
+        //         cin.get();
+        //         cin.get();
+        //         return;
+        //     }
 
-                    for(int i = 0; i < leftSibling->recordsFilled; i++) // left sibling has smaller record keys
-                    {
-                        records[nodeptr->recordsFilled + i] = leftSibling->records[i];
-                    }
+        //     BNode* leftSibling = nullptr;
+        //     if(childNumber > 0)
+        //         leftSibling = readNode(topNodeParent()->childrenAddress[childNumber-1]);
+        //     if(leftSibling)
+        //     {
+        //         if(leftSibling->recordsFilled < NODE_SIZE) // it is not full
+        //         {
+        //             // reading all records to an array for distribution
+        //             int totalRecords = topNode()->recordsFilled + leftSibling->recordsFilled + 2; // + record in parent + record to insert
+        //             BRecord* records = (BRecord*) malloc(sizeof(BRecord) * totalRecords);
 
-                    records[nodeptr->recordsFilled] = parent->records[childNumber-1]; // record in parent is in between records of left sibling and nodeptr
-                    // parent's children grouped by index in arrays:
-                    // (* R)        (* R)        (* R)       (* R)
-                    //               ^left        ^nodeptr    ^right
-                    //               sibling                  sibling
-                    // the record between nodeptr and left sibling is in parent's array on the same index as left sibling
-                    // the record between nodeptr and right sibling would be on the same index as nodeptr
+        //             for(int i = 0; i < leftSibling->recordsFilled; i++) // left sibling has smaller record keys
+        //             {
+        //                 records[topNode()->recordsFilled + i] = leftSibling->records[i];
+        //             }
 
-                    for(int i = 0; i < nodeptr->recordsFilled; i++) // nodeptr has bigger keys than left sibling and the record in parent
-                        records[i] = nodeptr->records[i];
+        //             records[topNode()->recordsFilled] = topNodeParent()->records[childNumber-1]; // record in parent is in between records of left sibling and nodeptr
+        //             // parent's children grouped by index in arrays:
+        //             // (* R)        (* R)        (* R)       (* R)
+        //             //               ^left        ^nodeptr    ^right
+        //             //               sibling                  sibling
+        //             // the record between nodeptr and left sibling is in parent's array on the same index as left sibling
+        //             // the record between nodeptr and right sibling would be on the same index as nodeptr
 
-                    // records should be sorted from lowest to highest key
-                    // now insert our record
-                    for(int i = 0; i < totalRecords; i++)
-                    {
-                        if(records[i].key > r.key)
-                        {
-                            for(int j = totalRecords; j > i; j--) // shift all bigger records to the right
-                                records[j] = records[j-1];
+        //             for(int i = 0; i < topNode()->recordsFilled; i++) // nodeptr has bigger keys than left sibling and the record in parent
+        //                 records[i] = topNode()->records[i];
+
+        //             // records should be sorted from lowest to highest key
+        //             // now insert our record
+        //             for(int i = 0; i < totalRecords; i++)
+        //             {
+        //                 if(records[i].key > r.key)
+        //                 {
+        //                     for(int j = totalRecords; j > i; j--) // shift all bigger records to the right
+        //                         records[j] = records[j-1];
                             
-                            int address = dataAppendRecord(r);
-                            records[i] = {r.key, address};
-                            break;
-                        }
-                    }
+        //                     int address = dataAppendRecord(r);
+        //                     records[i] = {r.key, address};
+        //                     break;
+        //                 }
+        //             }
 
-                    //distribute records
-                    for(int i = 0; i < totalRecords/2; i++)
-                    {
-                        leftSibling->records[i] = records[i];
-                    }
-                    parent->records[totalRecords/2] = records[totalRecords/2];
-                    for(int i = totalRecords/2+1; i < totalRecords; i++)
-                    {
-                        nodeptr->records[i] = records[i];
-                    }
-                    free(records);
+        //             //distribute records
+        //             for(int i = 0; i < totalRecords/2; i++)
+        //             {
+        //                 leftSibling->records[i] = records[i];
+        //             }
+        //             topNodeParent()->records[totalRecords/2] = records[totalRecords/2];
+        //             for(int i = totalRecords/2+1; i < totalRecords; i++)
+        //             {
+        //                 topNode()->records[i] = records[i];
+        //             }
+        //             free(records);
 
-                    flushNode(parent);
-                    flushNode(nodeptr);
-                    flushNode(leftSibling);
+        //             flushNode(leftSibling);
 
-                }
-                free(leftSibling);
-                compensated = true;
-            }
+        //         }
+        //         free(leftSibling);
+        //         compensated = true;
+        //     }
 
-            BNode* rightSibling = nullptr;
-            if(!compensated && childNumber < NODE_SIZE)
-                rightSibling = readNode(parent->childrenAddress[childNumber+1]);
-            if(rightSibling)
-            {
-                if(rightSibling->recordsFilled < NODE_SIZE) // it is not full
-                {
-                    // reading all records to an array for distribution
-                    int totalRecords = nodeptr->recordsFilled + rightSibling->recordsFilled + 2; // + record in parent + record to insert
-                    BRecord* records = (BRecord*) malloc(sizeof(BRecord) * totalRecords);
+        //     BNode* rightSibling = nullptr;
+        //     if(!compensated && childNumber < NODE_SIZE)
+        //         rightSibling = readNode(topNodeParent()->childrenAddress[childNumber+1]);
+        //     if(rightSibling)
+        //     {
+        //         if(rightSibling->recordsFilled < NODE_SIZE) // it is not full
+        //         {
+        //             // reading all records to an array for distribution
+        //             int totalRecords = nodeptr->recordsFilled + rightSibling->recordsFilled + 2; // + record in parent + record to insert
+        //             BRecord* records = (BRecord*) malloc(sizeof(BRecord) * totalRecords);
 
-                    for(int i = 0; i < nodeptr->recordsFilled; i++) // nodeptr has lower keys
-                        records[i] = nodeptr->records[i];
+        //             for(int i = 0; i < nodeptr->recordsFilled; i++) // nodeptr has lower keys
+        //                 records[i] = nodeptr->records[i];
 
-                    records[nodeptr->recordsFilled] = parent->records[childNumber]; // record in parent is in between records of nodeptr and right sibling
-                    // parent's children grouped by index in arrays:
-                    // (* R)        (* R)        (* R)       (* R)
-                    //               ^left        ^nodeptr    ^right
-                    //               sibling                  sibling
-                    // the record between nodeptr and left sibling is in parent's array on the same index as left sibling
-                    // the record between nodeptr and right sibling would be on the same index as nodeptr
+        //             records[nodeptr->recordsFilled] = parent->records[childNumber]; // record in parent is in between records of nodeptr and right sibling
+        //             // parent's children grouped by index in arrays:
+        //             // (* R)        (* R)        (* R)       (* R)
+        //             //               ^left        ^nodeptr    ^right
+        //             //               sibling                  sibling
+        //             // the record between nodeptr and left sibling is in parent's array on the same index as left sibling
+        //             // the record between nodeptr and right sibling would be on the same index as nodeptr
 
-                    for(int i = 0; i < rightSibling->recordsFilled; i++) // right sibling has higher record keys
-                    {
-                        records[nodeptr->recordsFilled + i] = rightSibling->records[i];
-                    }
+        //             for(int i = 0; i < rightSibling->recordsFilled; i++) // right sibling has higher record keys
+        //             {
+        //                 records[nodeptr->recordsFilled + i] = rightSibling->records[i];
+        //             }
 
-                    // records should be sorted from lowest to highest key 
-                    // now insert our record
-                    for(int i = 0; i < totalRecords; i++)
-                    {
-                        if(records[i].key > r.key)
-                        {
-                            for(int j = totalRecords; j > i; j--) // shift all bigger records to the right
-                                records[j] = records[j-1];
+        //             // records should be sorted from lowest to highest key 
+        //             // now insert our record
+        //             for(int i = 0; i < totalRecords; i++)
+        //             {
+        //                 if(records[i].key > r.key)
+        //                 {
+        //                     for(int j = totalRecords; j > i; j--) // shift all bigger records to the right
+        //                         records[j] = records[j-1];
                             
-                            int address = dataAppendRecord(r);
-                            records[i] = {r.key, address};
-                            break;
-                        }
-                    }
+        //                     int address = dataAppendRecord(r);
+        //                     records[i] = {r.key, address};
+        //                     break;
+        //                 }
+        //             }
 
-                    //distribute records
-                    for(int i = 0; i < totalRecords/2; i++)
-                    {
-                        leftSibling->records[i] = records[i];
-                    }
-                    parent->records[totalRecords/2] = records[totalRecords/2];
-                    for(int i = totalRecords/2+1; i < totalRecords; i++)
-                    {
-                        nodeptr->records[i] = records[i];
-                    }
-                    free(records);
+        //             //distribute records
+        //             for(int i = 0; i < totalRecords/2; i++)
+        //             {
+        //                 leftSibling->records[i] = records[i];
+        //             }
+        //             parent->records[totalRecords/2] = records[totalRecords/2];
+        //             for(int i = totalRecords/2+1; i < totalRecords; i++)
+        //             {
+        //                 nodeptr->records[i] = records[i];
+        //             }
+        //             free(records);
 
-                    flushNode(parent);
-                    flushNode(nodeptr);
-                    flushNode(leftSibling);
+        //             flushNode(parent);
+        //             flushNode(nodeptr);
+        //             flushNode(leftSibling);
 
-                }
-                free(leftSibling);
-                compensated = true;
-            }
+        //         }
+        //         free(leftSibling);
+        //         compensated = true;
+        //     }
             
-            if(rightSibling)
-                free(rightSibling);
-            if(parent)
-                free(parent);
-        }
-        // compensation ended
+        //     if(rightSibling)
+        //         free(rightSibling);
+        //     if(parent)
+        //         free(parent);
+        // }
+        // // compensation ended
 
-        if(compensated)
-        {
-            return;
-        }
+        // if(compensated)
+        // {
+        //     return;
+        // }
 
+        splitNodeAdd(record, childAddress);
 
-
-        
-
-        
-
-
-
-
-        // look for child node
-        for(int i = 0; i < NODE_SIZE; i++)
-        {
-            if(nodeptr->records[i].key > key)// is smaller than some existing record,
-            {
-                if(!loadNode(nodeptr->childrenAddress[i])) // if this child doesnt exist create it
-                    addChild(nodeptr->myAddress, i);
-                nodeAddRecord(nodeptr->childrenAddress[i], r);
-                return;  
-            }
-        }
-
-        // key is bigger than anything in this node, try to add to the last child
-        if(!loadNode(nodeptr->childrenAddress[NODE_SIZE])) // if this child doesnt exist create it
-            addChild(nodeptr->myAddress, NODE_SIZE);   
-        nodeAddRecord(nodeptr->childrenAddress[NODE_SIZE], r);
+        popNode(); 
     }
 
-    void splitNode(int nodeAddress)
+    //topNode() is the left split after this
+    void splitNodeAdd(BRecord r, int childAddress)
     {
-        BNode* parent = nodeptr;
-        BNode* node = readNode(nodeAddress);
-
         int totalRecords = NODE_SIZE;
 
-        BRecord* records = (BRecord*) malloc(sizeof(BRecord) * NODE_SIZE);
-        int* childrenAddresses = (int*) malloc(sizeof(int) * NODE_SIZE);
+        BRecord* records = (BRecord*) malloc(sizeof(BRecord) * (NODE_SIZE+1));
+        int* childrenAddresses = (int*) malloc(sizeof(int) * (NODE_SIZE+1));
 
         for(int i = 0; i < NODE_SIZE; i++) // copy all records and children from the node
         {
-            records[i] = node->records[i];
-            childrenAddresses[i] = node->childrenAddress[i];
+            records[i] = topNode()->records[i];
+            childrenAddresses[i] = topNode()->childrenAddress[i];
+        }
+        //insert new record
+        bool inserted = false;
+        for(int i = 0; i < NODE_SIZE; i++)
+        {
+            if(r.key < records[i].key)
+            {
+                for(int j = NODE_SIZE; j > i; j--)
+                {
+                    records[j] = records[j-1];
+                    childrenAddresses[j] = childrenAddresses[j-1];
+                }
+                records[i] = r;
+                childrenAddresses[i] = childAddress;
+                inserted = true;
+                break;
+            }
+        }
+        if(!inserted) // should just go on the end
+        {
+            records[NODE_SIZE] = r;
+            childrenAddresses[NODE_SIZE] = childAddress;
         }
         
         BNode* leftSplit = new BNode();
-        leftSplit->parentAddress = node->myAddress;
-        BNode* rightSplit = new BNode();
-        rightSplit->parentAddress = node->myAddress;
 
-        BRecord r = records[totalRecords/2];
+        // node will be reused as right split
+        // if node is root then the node has to remain root so right split will
+        // be created
+        BNode* rightSplit;
+        if(topNode() == getRoot())
+            rightSplit = new BNode();
+        else
+            rightSplit = topNode();
+
+        
 
 
         // distribute records among the new children
@@ -676,39 +669,89 @@ public:
             rightSplit->records[i] = records[totalRecords/2 + i + 1];
             rightSplit->childrenAddress[i] = childrenAddresses[totalRecords/2 + i + 1];
         }
+        for(int i = totalRecords/2; i < totalRecords; i++)
+        {
+            leftSplit->records[i] = BRecord();
+            leftSplit->childrenAddress[i] = -1;
+
+            rightSplit->records[i] = BRecord(); // makes sure to clean up records which should not be there, but could be left from reusing the node
+            rightSplit->childrenAddress[i] = -1;
+        }
+
+        leftSplit->recordsFilled = totalRecords/2;
+        rightSplit->recordsFilled = totalRecords/2;
+        leftSplit->dirty = true;
+        rightSplit->dirty = true;       
+
+        BRecord middle = records[totalRecords/2];
+        int childMiddle = childrenAddresses[totalRecords/2];
 
         // record at totalRecords/2 was not moved, it will be the record inserted into parent
-        leftSplit->childrenAddress[totalRecords/2] = childrenAddresses[totalRecords/2]; // copy the child before middle address
+        leftSplit->childrenAddress[totalRecords/2] = childMiddle; // copy the child before middle address
         rightSplit->childrenAddress[totalRecords/2] = childrenAddresses[totalRecords-1]; // copy the last child address
 
-
         
-        // insert to parent
-        loadNode(node->parentAddress);
-
-        for(int i = 0; i < NODE_SIZE; i++)
+        free(records);
+        free(childrenAddresses);
+        
+        if(topNode() == getRoot())
         {
-            if(node->records[i] > )
+            clearNode(topNode()); // clear new root as its contents were moved to its new children
+            topNode()->childrenAddress[1] = numberOfNodes; // the addressess left and right split will get when appended
+            topNode()->childrenAddress[0] = numberOfNodes+1; // first the right split gets appended, so the order is right-to-left
+            topNode()->records[0] = middle;
+            topNode()->recordsFilled = 1;
+            topNode()->dirty = true;
+            leftSplit->parentAddress = topNode()->myAddress;
+            rightSplit->parentAddress = topNode()->myAddress;
+
+            flushRoot();
+
+            indexAppendNode(rightSplit);
+            delete rightSplit;
         }
+        else if(topNodeParent())
+        {
+            leftSplit->parentAddress = topNodeParent()->myAddress;
+        }
+
+        indexAppendNode(leftSplit);
+
+        delete leftSplit;
+
+        if(topNode() != getRoot()) // if it was root then middle is already placed and there is no need of further propagation
+        {
+            popNode();
+            topAddRecord(middle, leftSplit->myAddress);
+        }
+        
     }
 
-    void splitPropagateUp()
-
-    void addChild(int nodeAddress, int i)
+    void clearNode(BNode* node)
     {
-        loadNode(nodeAddress);
+        for(int i = 0; i < NODE_SIZE; i++)
+        {
+            node->records[i] = BRecord();
+            node->childrenAddress[i] = -1;
+        }
+        node->childrenAddress[NODE_SIZE] = -1;
+        node->recordsFilled = 0;
+    }
 
-        if(nodeptr->childrenAddress[i] != -1) 
+
+    void addChild(int i)
+    {
+        if(topNode()->childrenAddress[i] != -1) 
         {
             cout << "Child already exists!";
             return;
         }
 
         BNode child;
-        child.parentAddress = nodeptr->myAddress;
+        child.parentAddress = topNode()->myAddress;
 
         indexAppendNode(&child);
-        nodeptr->childrenAddress[i] = child.myAddress;
+        topNode()->childrenAddress[i] = child.myAddress;
     }
 
     int dataBlockAddress(int recordAddress)
@@ -720,6 +763,7 @@ public:
     // sets myAddress in the node to the address in file where it is put
     void indexAppendNode(BNode* n)
     {
+        n->dirty = false; // will be clean because it will be saved 
         open();
         fseek(index, numberOfNodes * sizeof(BNode), SEEK_SET);
         BNode null;
@@ -776,12 +820,15 @@ public:
             dataAppendBlock();
     }
 
-
+    void flushRoot()
+    {
+        flushNode(nodeBuffer[0]);
+    }
 
     ~Btree()
     {
         cout << "Tree destructor, this = " << this << "\n";
-        flushCurrentNode();
+        popAll();
         close();
     }
 
@@ -790,7 +837,8 @@ public:
         cout << "\n\n#######   BTree Contents:\n";
         BNode node;
 
-        flushCurrentNode();
+        popAll();
+        //flushCurrentNode();
         flushRoot();
 
 
@@ -798,9 +846,11 @@ public:
         int i = 0;
         open();
         fseek(index, 0, SEEK_SET);
-        while(loadNode(i++))
+        while(BNode* node = readNode(i++))
         {
-            cout << nodeptr->toString() << "\n";
+            cout << node->toString() << "\n";
+            free(node);
+            node = nullptr;
         }
         // while(fread(&node, sizeof(BNode), 1, index))
         // {

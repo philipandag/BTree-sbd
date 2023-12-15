@@ -76,12 +76,6 @@ void App::mainMenu()
     }
     else if(input == "i")
     {
-        cout << "tree address: " << tree << "\n";
-        cout << "root: " << tree->getRoot() << "\n";
-        tree->loadNode(tree->getRoot()->myAddress);
-        cout << "loadNode root: " << tree->getCurrentNode() << "\n";
-        tree->loadRoot();
-        cout << "loadRoot root: " << tree->getCurrentNode() << "\n";
         state = AppState::INTERACTIVE;
     }
     else if(input == "l")
@@ -144,7 +138,6 @@ void addRecordAndComment(Btree* tree, Record* record)
     int reads = tree->getReads();
     int writes = tree->getWrites();
     tree->addRecord(*record);
-    tree->flushCurrentNode();
     tree->printContents();
     cout << "Reads: " << tree->getReads() - reads << " Writes: " << tree->getWrites() - writes << "\n";
 }
@@ -284,7 +277,7 @@ void App::interactive()
         }
         else if(input == "p")
         {
-            if(!tree->loadNode(tree->getCurrentNode()->parentAddress))
+            if(!tree->popNode())
             {
                 cout << "Current node doesnt have a parent!\n";
                 if(tree->getCurrentNode() == tree->getRoot())
@@ -297,7 +290,7 @@ void App::interactive()
         }
         else if(input == "r")
         {
-           tree->loadNode(tree->getRoot()->myAddress);
+           tree->popAll();
         }
         else if(input == "q")
         {
