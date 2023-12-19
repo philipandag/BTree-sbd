@@ -27,7 +27,9 @@ class App
     string commandsFile;
     Btree* tree = nullptr;
 
-    bool verbose = false;
+    bool log = false;
+    bool dontClean = false;
+    bool verbose = true;
 
     enum FileCreateMode{
         RANDOM,
@@ -40,7 +42,7 @@ class App
     string fileModeToString(FileCreateMode mode);
 
     string fileToCreate = "new_database.db";
-    int fileToCreateRecords = 1024;
+    int fileToCreateRecords = 0;
 
 
 
@@ -49,9 +51,13 @@ class App
     void doCreateFile();
     void interactive();
     void load();
-    void processCommands();
+    void executeCommand(string command);
+    void addRecordAndComment(Record* record);
+    void deleteRecordAndComment(int key);
+    void findRecordAndComment(int key);
+    void modifyRecordAndComment(int key, Record record);
 public:
-    App();
+    App(bool log = false);
     ~App();
     void mainLoop();
 };

@@ -1,0 +1,108 @@
+\documentclass{article}
+%\usepackage[]{polski}
+\usepackage[T1]{fontenc}
+\usepackage[polish]{babel}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{listings}
+
+\graphicspath{ {./} }
+\title{SBD Sprawozdanie z zadania 2.}
+\author{Filip Gołaś 188776}
+\date{\today}
+\begin{document}
+    \maketitle
+    \section{Zadanie}
+
+    W ramach zadania zaimplementowano indeksową organizację pliku w postaci B-drzewa
+    z możliwością wstawiania, usuwania, wyszukiwania i modyfikowania rekordów.
+    Kluczem jest sekwencja pięciu liczb naturalnych rozszerzona
+    o klucz (liczbę naturalną).
+
+    \subsection{Implementacja}
+
+    Program w trakcie działania przechowuje w buforze sekwencję wierzchołków 
+    drzewa od korzenia do badanego liścia by uniknąć wielokrotnego odczytywania.
+    Po każdej operacji na drzewie, bufor jest wpisywany do pliku by jego zawartość
+    była aktualna. Wierzchołki nie są zapisywane jeżeli nie uległy zmianie.
+    Strutura wierzchołka b-drzewa zawiera w sobie tablicę struktur BRecord, które
+    zawierają klucz i wskaźnik do rekordu w pliku danych i tablicę wskaźników plikowych
+    do wierzchołków potomnych. W celu usprawnienia działania programu, wierzchołki
+    posiadają także: adres rodzica, liczbę wpisanych rekordów, swój własny adres
+    oraz informację, czy są zgodne z plikiem. Wierzchołki są zapisywane do 
+    pliku poprzez serializację do postaci binarnej. 
+    Rekordy, do których odwołują się wierzchołki, są zapisywane w pliku danych
+    w zserializowanej postaci binarnej. Rekordy nie są w tym pliku nigdy przesuwane, 
+    są zawsze dodawane na koniec pliku, a ich adresy są zapisywane w wierzchołkach.
+
+    \subsection{Plik testowy}
+    Testować program można z użyciem pliku testowego oraz poprzez tryb interaktywny.
+    Polecenia w obydwu sposobach są identyczne:
+    '+ n' - dodaj rekord o kluczu n, gdzie n to liczba naturalna.
+    '- n' - usuń rekord o kluczu n, gdzie n to liczba naturalna.
+    '? n' - wyszukaj rekord o kluczu n, gdzie n to liczba naturalna.
+    '= n' - zmodyfikuj rekord o kluczu n, gdzie n to liczba naturalna.
+    W pliku testowym polecenia są zapisane w kolejnych liniach, w trybie interaktywnym
+    należy wpisywać je i zatwierdzać enterem.
+
+    \subsection{Prezentacja wyników}
+    Wierzchołki drzewa są reprezentowane w postaci tabelki, na przykład:
+    \begin{lstlisting}
+    BNode & 0
+    &3
+    {K2 & 1}
+    &4
+    {}
+    -
+    \end{lstlisting}
+    Oznacza wierzchołek zapisany w pliku o adresie \emph{0}. Ma on jeden rekord o kluczu \emph{2},
+    który jest zapisany w pliku danych pod adresem \emph{1}. Wierzchołek ma dwoje dzieci.
+    Pod adresem \emph{3} w pliku z wierzchołkami znajduje się potomek o kluczach mniejszych
+    od \emph{2}, pod adresem \emph{4} potomek o kluczach większych od \emph{2}. Drugi rekord w wierzchołku
+    jest pusty - \emph{\{\}}, ostatnie dziecko jest puste \emph{(--)}.
+
+    W trakcie trybu interaktywnego można poruszać się po drzewie poprzez:
+    \begin{itemize}
+    \item 'n' - przejdź do n-tego dziecka.
+    \item 'p' - przejdź do rodzica.
+    \item 'r' - przejdź do korzenia.
+    \end{itemize}
+    W trakcie poruszania się wyświetlany jest aktualnie wybrany wierzchołek.
+    Można wyświetlać zawartość drzewa poprzez:
+    \begin{itemize}
+    \item 't' - wyświetl całe drzewo.
+    \item 's' - wyświetl rekordy w aktualnym wierzchołku.
+    \item 'a' - wyświetl wszystkie rekordy występujące w drzewie zgodnie z uporządkowaniem
+    \end{itemize}
+    Można operować na drzewie poprzez:
+    \begin{itemize}
+    \item '? n' - wyszukaj rekord o kluczu n, gdzie n to liczba naturalna.
+    \item '+ n' - dodaj rekord o kluczu n, gdzie n to liczba naturalna.
+    \item '- n' - usuń rekord o kluczu n, gdzie n to liczba naturalna.
+    \item '= n m' - zmodyfikuj rekord o kluczu n, tak by miał klucz m, gdzie n i m to liczby naturalne.
+    \end{itemize}
+    Operacje na drzewie wymagają powrotu do korzenia, więc aktywny wierzchołek 
+    zmieni się na korzeń.
+
+
+
+    \section{Eksperymenty}
+    Brak
+
+    \section{Wnioski}
+    B-drzewo jest strukturą, która pozwala na efektywne wyszukiwanie z ilością
+    koniecznych dostępów ograniczoną przez wysokość drzewa. Modyfikacja drzewa również
+    wymaga dostępów do plików zależnych od wysokości drzewa, która rośnie 
+    wraz z powiększaniem się drzewa bardzo wolno, bo jest ograniczona poprzez 
+    \emph{$\log_d N$}, gdzie
+    \emph{d} to stopień drzewa (ilość rekordów w wierzchołku), a \emph{N} to całkowita
+    ilość rekordów w drzewie. B-drzewo jest strukturą stabilną dzięki zagwarantowaniu
+    równej długości ścieżki od korzenia do każdego z liści.
+    Dodatkowo można mieć pewność, że w każdej chwili pamięć 
+    jest wykorzystywana co najmniej w 50\% a średnio w 70\%. Implementacja b-drzewa 
+    jest trudna, jednak w przypadku tworzenia systemu bazodanowego wysokiej jakości
+    działającego na bardzo dużych zbiorach danych warto zaimplementować tę strukturę
+    lub jej pochodne.
+
+
+\end{document}
